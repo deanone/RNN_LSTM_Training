@@ -9,12 +9,15 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import cross_val_score
+from sklearn.model_selection import cross_val_predict
 from math import sqrt
-from keras import Sequential
-from keras.layers import Dense
-from keras.layers import LSTM
+from tensorflow.keras import Sequential
+from tensorflow.keras.layers import Dense
+from tensorflow.keras.layers import LSTM
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LinearRegression
+import os
 
 
 def mean_absolute_percentage_error(y_true, y_pred):
@@ -153,122 +156,111 @@ def extrapolate_values(values, n):
 
 
 def main():
+    os.chdir('D:\code-personal\Python\RNN_LSTM_Training\HouseholdPowerConsumption')
+    
 	# Reproducibility
-	np.random.seed(42)
+    np.random.seed(42)
 	
 	# Whether to use baseline model or LSTM
-	BASELINE = False
+    BASELINE = True
 	
 	# Load data
-	dataset = pd.read_csv('household_power_consumption.csv')
-	values = dataset.values
-	del dataset
+    dataset = pd.read_csv('data/household_power_consumption.csv')
+    values = dataset.values
+    del dataset
 	
 	# Keep a small portion of the data and 1 variable
-	num_months = 3
-	months_data_index = num_months * 30 * 24 * 60
-	var_index = 1
-	values = values[0:months_data_index, var_index]
+    num_months = 3
+    months_data_index = num_months * 30 * 24 * 60
+    var_index = 1
+    values = values[0:months_data_index, var_index]
 	
 	# Downsample data, i.e. aggregated minute values into 15-min intervals
-	num_minutes_per_interval = 15
-	values = downsample(values, num_minutes_per_interval)
+    num_minutes_per_interval = 60
+    values = downsample(values, num_minutes_per_interval)
+    
+    # Split data into train and test
+    train_perc = 0.8
+    train, test = train_test_split(values, train_perc)
 	
 	# Normalize data into [0,1] interval
-	scaler = MinMaxScaler(feature_range=(0,1))
-	values_normalized = scaler.fit_transform(values.reshape(-1,1))
-	values_normalized = values_normalized.reshape(values.shape)
-	
-	# Split data into train and test
-	train_perc = 0.8
-	train, test = train_test_split(values_normalized, train_perc)
-	
+    scaler = MinMaxScaler(feature_range=(0,1))
+    scaler.fit(train.reshape(-1,1))
+    train_normalized = scaler.transform(train.reshape(-1,1))
+    train_normalized = train_normalized.reshape(train.shape)
+    test_normalized = scaler.transform(test.reshape(-1,1))
+    test_normalized = test_normalized.reshape(test.shape)
+		
 	# Transform data into an ML-compatible form
-	num_previous_days = 1
-	p = num_previous_days * int(24 * 60 / num_minutes_per_interval)
-	h = int(24 * 60 / num_minutes_per_interval)
-	X_train, Y_train = transform_to_ml_dataset_univariate(train, p, h)
-	X_test, Y_test = transform_to_ml_dataset_univariate(test, p, h)
-	
-	#if BASELINE:
-	model_LR = build_baseline_model()
-	model_LR.fit(X_train, Y_train)
-	train_predictions_LR = model_LR.predict(X_train)
-	test_predictions_LR = model_LR.predict(X_test)
-	#else:
+    num_previous_days = 7
+    p = num_previous_days * int(24 * 60 / num_minutes_per_interval)
+    h = int(24 * 60 / num_minutes_per_interval)
+    X_train, Y_train = transform_to_ml_dataset_univariate(train_normalized, p, h)
+    X_test, Y_test = transform_to_ml_dataset_univariate(test_normalized, p, h)
+	    
+    if BASELINE:
+        model = build_baseline_model()
+        model.fit(X_train, Y_train)
+        cross_val_predictions = cross_val_predict(model, X_train, Y_train, cv=5)
+        cross_val_mapes, cross_val_total_mape = mean_absolute_percentage_error(scaler.inverse_transform(Y_train), scaler.inverse_transform(cross_val_predictions))
+        print(cross_val_mapes)
+        print(cross_val_total_mape)
+    else:
 		# Transform data into a form compatible with LSTM, i.e. [samples, timesteps, features]
-	X_train = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
-	X_test = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))
-	
-	model_LSTM = build_vanilla_LSTM_model(p, h)
-	model_LSTM.fit(X_train, Y_train, epochs=100, batch_size=1)
-	train_predictions_LSTM = model_LSTM.predict(X_train)
-	test_predictions_LSTM = model_LSTM.predict(X_test)
+        X_train = X_train.reshape((X_train.shape[0], 1, X_train.shape[1]))
+        X_test = X_test.reshape((X_test.shape[0], 1, X_test.shape[1]))	
+        model = build_vanilla_LSTM_model(p, h)
+        model.fit(X_train, Y_train, epochs=100, batch_size=1)
 	
 	# Make predictions on train and test data
-	#train_predictions = model.predict(X_train)
-	#test_predictions = model.predict(X_test)
-	
-	train_predictions = np.zeros(train_predictions_LR.shape)
-	test_predictions = np.zeros(test_predictions_LR.shape)
-	
-	short_long_boundary = 4
-	
-	train_predictions[:, 0:short_long_boundary] = ((train_predictions_LR[:, 0:short_long_boundary] + train_predictions_LSTM[:, 0:short_long_boundary]) / 2.0)
-	train_predictions[:, short_long_boundary:] = ((train_predictions_LR[:, short_long_boundary:] + train_predictions_LSTM[:, short_long_boundary:]) / 2.0)
-	del train_predictions_LR
-	del train_predictions_LSTM
-	
-	test_predictions[:, 0:short_long_boundary] = ((test_predictions_LR[:, 0:short_long_boundary] + test_predictions_LSTM[:, 0:short_long_boundary]) / 2.0)
-	test_predictions[:, short_long_boundary:] = ((test_predictions_LR[:, short_long_boundary:] + test_predictions_LSTM[:, short_long_boundary:]) / 2.0)
-	del test_predictions_LR
-	del test_predictions_LSTM
+    train_predictions = model.predict(X_train)
+    test_predictions = model.predict(X_test)
 	
 	# Scale data back to origin range of values
-	Y_train_scaled_back = scaler.inverse_transform(Y_train)
-	train_predictions_scaled_back = scaler.inverse_transform(train_predictions)	
-	Y_test_scaled_back = scaler.inverse_transform(Y_test)
-	test_predictions_scaled_back = scaler.inverse_transform(test_predictions)
+    Y_train_scaled_back = scaler.inverse_transform(Y_train)
+    train_predictions_scaled_back = scaler.inverse_transform(train_predictions)	
+    Y_test_scaled_back = scaler.inverse_transform(Y_test)
+    test_predictions_scaled_back = scaler.inverse_transform(test_predictions)
 	
 	# Compute and print error metrics on train and test data
 	#train_rmse = sqrt(mean_squared_error(Y_train_scaled_back, train_predictions_scaled_back))
 	#test_rmse = sqrt(mean_squared_error(Y_test_scaled_back, test_predictions_scaled_back))
 	
-	train_mapes, train_total_mape = mean_absolute_percentage_error(Y_train_scaled_back, train_predictions_scaled_back)
-	test_mapes, test_total_mape = mean_absolute_percentage_error(Y_test_scaled_back, test_predictions_scaled_back)
+    train_mapes, train_total_mape = mean_absolute_percentage_error(Y_train_scaled_back, train_predictions_scaled_back)
+    test_mapes, test_total_mape = mean_absolute_percentage_error(Y_test_scaled_back, test_predictions_scaled_back)
 	
 #	print('Total Train RMSE (in kWh): ', round(train_rmse, 3))
 #	print('Total Test RMSE (in kWh): ', round(test_rmse, 3))
 #	print('\n')
 
-	print('Total Train MAPE (%): ', round(train_total_mape, 3))
-	print('Total Test MAPE (%): ', round(test_total_mape, 3))
+    print('Total Train MAPE (%): ', round(train_total_mape, 3))
+    print('Total Test MAPE (%): ', round(test_total_mape, 3))
 	
-	print('Train MAPE (%) for h = 1: ', round(train_mapes[0], 3))
-	print('Test MAPE (%) for h = 1: ', round(test_mapes[0], 3))
+    print('Train MAPE (%) for h = 1: ', round(train_mapes[0], 3))
+    print('Test MAPE (%) for h = 1: ', round(test_mapes[0], 3))
 	
-	print('Train MAPE (%) for h = {}: '.format(h), round(train_mapes[h-1], 3))
-	print('Test MAPE (%) for h = {}: '.format(h), round(test_mapes[h-1], 3))
+    print('Train MAPE (%) for h = {}: '.format(h), round(train_mapes[h-1], 3))
+    print('Test MAPE (%) for h = {}: '.format(h), round(test_mapes[h-1], 3))
 	
-	plt.figure(figsize=(10,5))
-	plt.plot(train_mapes, label='train MAPEs')
-	plt.plot(test_mapes, label='test MAPEs')
-	plt.legend()
-	plt.show()
+    plt.figure(figsize=(10,5))
+    plt.plot(train_mapes, label='train MAPEs')
+    plt.plot(test_mapes, label='test MAPEs')
+    plt.legend()
+    plt.show()
 	
-	plt.figure(figsize=(10,5))
-	plt.plot(Y_test_scaled_back[:,0], label='real')
-	plt.plot(test_predictions_scaled_back[:,0], label='predictions')
-	plt.title('h = 1')
-	plt.legend()
-	plt.show()
+    plt.figure(figsize=(10,5))
+    plt.plot(Y_test_scaled_back[:,0], label='real')
+    plt.plot(test_predictions_scaled_back[:,0], label='predictions')
+    plt.title('h = 1')
+    plt.legend()
+    plt.show()
 	
-	plt.figure(figsize=(10,5))
-	plt.plot(Y_test_scaled_back[:,h-1], label='real')
-	plt.plot(test_predictions_scaled_back[:,h-1], label='predictions')
-	plt.title('h = {}'.format(h))
-	plt.legend()
-	plt.show()
+    plt.figure(figsize=(10,5))
+    plt.plot(Y_test_scaled_back[:,h-1], label='real')
+    plt.plot(test_predictions_scaled_back[:,h-1], label='predictions')
+    plt.title('h = {}'.format(h))
+    plt.legend()
+    plt.show()
 	
 	
 if __name__ == '__main__':
